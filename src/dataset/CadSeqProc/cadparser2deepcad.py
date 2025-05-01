@@ -21,6 +21,11 @@ from utility.utils import ensure_dir
 # 配置日志
 clglogger = CLGLogger().configure_logger().logger
 
+# 自定义异常类，用于表示几何重建过程中的错误
+class GeometryReconstructionError(Exception):
+    """自定义异常类，用于标记几何重建错误"""
+    pass
+
 # ---------------------------------------------------------------------------- #
 #                     CADParser JSON to DeepCAD JSON                           #
 # ---------------------------------------------------------------------------- #
@@ -255,6 +260,9 @@ class CadParserToDeepCadConverter:
         
         Returns:
             排序后的曲线列表
+            
+        Raises:
+            GeometryReconstructionError: 当发现不连续的曲线且无法修复时抛出
         """
         if len(curves) <= 1:
             return curves
@@ -294,13 +302,10 @@ class CadParserToDeepCadConverter:
                         processed_count += 1
                         break
         
-            # 如果仍然没有找到匹配的曲线，添加剩余曲线中的第一条
-            # 这可能会导致几何不连续，但至少保证了处理所有曲线
+            # 如果仍然没有找到匹配的曲线，则认为几何不连续
             if not found and remaining_curves:
-                clglogger.warning(f"发现不连续的曲线，可能导致几何重建错误")
-                sorted_curves.append(remaining_curves[0])
-                remaining_curves.pop(0)
-                processed_count += 1
+                # clglogger.warning(f"发现不连续的曲线，可能导致几何重建错误")
+                raise GeometryReconstructionError("发现不连续的曲线，无法形成有效闭环")
     
         # 检查环是否闭合（最后一条曲线的终点应该连接到第一条曲线的起点）
         if len(sorted_curves) > 1:
@@ -311,6 +316,9 @@ class CadParserToDeepCadConverter:
                 # 尝试反转最后一条曲线使环闭合
                 if self._points_are_equal(last_curve.get("start_point", {}), first_curve.get("start_point", {})):
                     sorted_curves[-1] = self._reverse_curve(last_curve)
+                else:
+                    # 如果反转后仍不闭合，则抛出异常
+                    raise GeometryReconstructionError("环不闭合，无法形成有效闭环")
     
         return sorted_curves
     def _points_are_equal(self, point1, point2, tolerance=1e-9):
@@ -565,7 +573,7 @@ class CadParserToDeepCadConverter:
             if is_reversed and (isinstance(is_reversed, bool) or (isinstance(is_reversed, str) and is_reversed.lower() == "true")):
                 # 将反向距离放在extent_two中
                 deepcad_extrusion["extent_two"]["distance"]["value"] = -reverse_dist
-                deepcad_extrusion["extent_one"]["distance"]["value"] = 0  # 正向为0
+                deepcad_extrusion["extent_one"]["distance"]["value"] = forward_dist
                 
                 # 设置为双向拉伸类型
                 if reverse_dist > 0:
@@ -620,9 +628,9 @@ class CadParserToDeepCadConverter:
                 ]
                 ##clglogger.debug(f"从sketch字段创建了{len(profiles_list)}个轮廓引用")
         
-        # 如果没有找到profile引用列表，记录警告
+        # 如果没有找到profile引用列表，抛出异常
         if not profiles_list:
-            clglogger.warning(f"未在拉伸特征中找到profiles引用: {cadparser_extrusion.get('name')}")
+            raise GeometryReconstructionError(f"未在拉伸特征中找到profiles引用: {cadparser_extrusion.get('name')}")
         
         # 处理每个profile引用
         for profile_ref in profiles_list:
@@ -662,7 +670,7 @@ class CadParserToDeepCadConverter:
                         found = True
             
             if not found:
-                clglogger.warning(f"无法找到对应的草图或轮廓: sketch={sketch_id}, profile={profile_id}")
+                raise GeometryReconstructionError(f"无法找到对应的草图或轮廓: sketch={sketch_id}, profile={profile_id}")
         
         return deepcad_extrusion, extrusion_id
 
@@ -735,9 +743,9 @@ class CadParserToDeepCadConverter:
                 profiles_list = cadparser_revolve[field]
                 break
         
-        # 如果没有找到profile引用列表，记录警告
+        # 如果没有找到profile引用列表，抛出错误
         if not profiles_list:
-            clglogger.warning(f"未在旋转特征中找到profiles引用: {cadparser_revolve.get('name')}")
+            raise GeometryReconstructionError(f"未在旋转特征中找到profiles引用: {cadparser_revolve.get('name')}")
         
         # 处理每个profile引用
         for profile_ref in profiles_list:
@@ -771,7 +779,7 @@ class CadParserToDeepCadConverter:
                         break
             
             if not found:
-                clglogger.warning(f"无法找到对应的草图或轮廓: sketch={sketch_id}, profile={profile_id}")
+                raise GeometryReconstructionError(f"无法找到对应的草图或轮廓: sketch={sketch_id}, profile={profile_id}")
         
         return deepcad_revolve, revolve_id
 
@@ -863,6 +871,9 @@ class CadParserToDeepCadConverter:
             
         Returns:
             DeepCAD格式的JSON数据
+            
+        Raises:
+            GeometryReconstructionError: 当关键几何特征无法转换时抛出
         """
         # 重置内部状态
         self.id_counter = 0
@@ -879,6 +890,9 @@ class CadParserToDeepCadConverter:
             },
             "sequence": []
         }
+        
+        # 跟踪是否发生了关键错误
+        critical_errors = []
         
         # 处理实体和序列
         entities_map = cadparser_data.get("entities", {})
@@ -903,7 +917,7 @@ class CadParserToDeepCadConverter:
                     converted_entity, new_entity_id = self.convert_sketch(entity_data, entity_uuid)
                     deepcad_type = "Sketch"
                     
-                elif entity_type in ["Extrusion", "ExtrusionCut"]:
+                elif entity_type in ["Extrusion", "ExtrusionCut","ExtrusionBoss"]:
                     # 传递 entity_uuid
                     converted_entity, new_entity_id = self.convert_extrusion(entity_data, cadparser_data, entity_uuid)
                     deepcad_type = "ExtrudeFeature"
@@ -913,7 +927,7 @@ class CadParserToDeepCadConverter:
                     converted_entity, new_entity_id = self.convert_revolve(entity_data, entity_uuid)
                     deepcad_type = "RevolveFeature"
                 else:
-                    clglogger.warning(f"未知的实体类型: {entity_type}，跳过实体 {entity_uuid}")
+                    # clglogger.warning(f"未知的实体类型: {entity_type}，跳过实体 {entity_uuid}")
                     continue
                     
                 if converted_entity and new_entity_id and deepcad_type:
@@ -926,14 +940,28 @@ class CadParserToDeepCadConverter:
                 else:
                      clglogger.warning(f"转换实体 {entity_uuid} (类型: {entity_type}) 失败或未返回有效结果")
 
+            except GeometryReconstructionError as ge:
+                # 捕获几何重建错误并记录
+                error_msg = f"处理实体 {entity_uuid} (类型: {entity_type}) 时几何重建错误: {str(ge)}"
+                # clglogger.warning(error_msg)
+                critical_errors.append(error_msg)
             except Exception as e:
                 import traceback
-                clglogger.error(f"处理实体 {entity_uuid} (类型: {entity_type}) 时出错: {e}")
+                error_msg = f"处理实体 {entity_uuid} (类型: {entity_type}) 时出错: {e}"
+                clglogger.error(error_msg)
+                # 针对关键错误（如找不到profiles引用）也将其视为几何重建错误
+                if "未在拉伸特征中找到profiles引用" in str(e) or "未在旋转特征中找到profiles引用" in str(e):
+                    critical_errors.append(error_msg)
                 ##clglogger.debug(traceback.format_exc())
         
         # 清理可能不再需要的引用
         del entities_map
         # gc.collect() # 可选：强制垃圾回收
+        
+        # 如果有关键错误，抛出异常
+        if critical_errors:
+            raise GeometryReconstructionError(f"转换过程中发生关键错误: {'; '.join(critical_errors[:3])}" + 
+                                            (f" 以及其他 {len(critical_errors)-3} 个错误" if len(critical_errors) > 3 else ""))
         
         return deepcad_json
 
@@ -994,15 +1022,32 @@ def process_file(input_file: str, output_file: str) -> bool:
             return False
         
         # 转换数据
-        converter = CadParserToDeepCadConverter()
-        deepcad_data = converter.convert(cadparser_data)
-        
-        # 保存转换后的数据
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(deepcad_data, f, indent=2, ensure_ascii=False)
-        
-        return True
+        try:
+            converter = CadParserToDeepCadConverter()
+            deepcad_data = converter.convert(cadparser_data)
+            
+            # 检查转换结果是否有效
+            if not deepcad_data["entities"] or not deepcad_data["sequence"]:
+                clglogger.warning(f"转换结果无效: {input_file} - 实体或序列为空")
+                return False
+            
+            # 保存转换后的数据
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(deepcad_data, f, indent=2, ensure_ascii=False)
+            
+            return True
+            
+        except GeometryReconstructionError as ge:
+            # 捕获几何重建错误并记录
+            clglogger.warning(f"跳过样本 {input_file}: {str(ge)}")
+            # 记录到转换日志文件
+            log_dir = os.path.dirname(output_file)
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, '../conversion_log.txt'), 'a', encoding='utf-8') as log:
+                log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | SKIP | {os.path.basename(input_file)}: {str(ge)}\n")
+            return False
+            
     except Exception as e:
         import traceback
         clglogger.error(f"转换文件 {input_file} 失败: {str(e)}")
