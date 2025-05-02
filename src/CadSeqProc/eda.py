@@ -7,10 +7,10 @@ import json
 import pandas as pd
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
-from src.CadSeqProc.utility.utils import get_files_scan
-from src.CadSeqProc.cad_sequence import CADSequence
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.decorator import measure_performance
+from utility.utils import get_files_scan
+from cad_sequence import CADSequence
+from utility.logger import CLGLogger
+from utility.decorator import measure_performance
 from tqdm import tqdm
 import argparse
 

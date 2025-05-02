@@ -1061,7 +1061,7 @@ def main():
     parser = argparse.ArgumentParser(description="将CADParser JSON转换为DeepCAD JSON格式")
     parser.add_argument("--input", required=True, help="输入CADParser JSON文件或目录")
     parser.add_argument("--output", required=True, help="DeepCAD JSON文件的输出目录")
-    parser.add_argument("--max_workers", type=int, default=8, help="并行处理的最大工作线程数")
+    parser.add_argument("--max_workers", type=int, default=12, help="并行处理的最大工作线程数")
     args = parser.parse_args()
     
     success_count = 0

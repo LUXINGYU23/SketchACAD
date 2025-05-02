@@ -25,8 +25,8 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3]))
 
 # 导入自定义模块
 from src.models.vqvae import VQVAE
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import ensure_dir
+from utility.macro import *
+from utility.utils import ensure_dir
 
 # 尝试导入wandb
 try:

@@ -6,11 +6,11 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-4]))
 
 
 import numpy as np
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import dequantize_verts, int_round, quantize, float_round
+from utility.logger import CLGLogger
+from utility.macro import *
+from utility.utils import dequantize_verts, int_round, quantize, float_round
 from loguru import logger
-from src.CadSeqProc.sequence.sketch.coord_system import CoordinateSystem
+from sequence.sketch.coord_system import CoordinateSystem
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
 clglogger = CLGLogger().configure_logger().logger
 
@@ -397,7 +397,7 @@ class RevolveSequence(object):
             from OCC.Core.AIS import AIS_Line, AIS_Shape
             from OCC.Core.Quantity import Quantity_Color, Quantity_TOC_RGB
             from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
-            from src.CadSeqProc.utility.utils import create_point_from_array
+            from utility.utils import create_point_from_array
             import math
             
             # 初始化显示
@@ -484,7 +484,7 @@ class RevolveSequence(object):
         from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeRevol
         from OCC.Core.BRepCheck import BRepCheck_Analyzer
         from OCC.Core.ShapeFix import ShapeFix_Shape
-        from src.CadSeqProc.utility.utils import create_point_from_array
+        from utility.utils import create_point_from_array
         import math
 
         try:

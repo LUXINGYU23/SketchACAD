@@ -11,7 +11,7 @@ from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
 from OCC.Core.GC import GC_MakeArcOfCircle
 from loguru import logger
 from rich import print
-from src.CadSeqProc.utility.utils import (
+from utility.utils import (
     angle_from_vector_to_x,
     rads_to_degs,
     create_point_from_array,
@@ -28,10 +28,10 @@ from src.CadSeqProc.utility.utils import (
 )
 import torch
 import matplotlib.patches as patches
-from src.CadSeqProc.geometry.line import Line
-from src.CadSeqProc.geometry.curve import Curve
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.logger import CLGLogger
+from geometry.line import Line
+from geometry.curve import Curve
+from utility.macro import *
+from utility.logger import CLGLogger
 import numpy as np
 
 

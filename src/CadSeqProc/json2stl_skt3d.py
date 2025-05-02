@@ -7,8 +7,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "../.."))
 sys.path.append(PROJECT_ROOT)
 
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
+from utility.logger import CLGLogger
+from utility.macro import *
 from cad_sequence import CADSequence
 import argparse
 import json

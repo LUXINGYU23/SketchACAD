@@ -4,9 +4,9 @@ sys.path.append("..")
 sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3]))
 
 import numpy as np
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import (
+from utility.logger import CLGLogger
+from utility.macro import *
+from utility.utils import (
     create_point_from_array,
     get_plane_normal,
     quantize,
@@ -19,7 +19,7 @@ from src.CadSeqProc.utility.utils import (
     float_round
 )
 import torch
-from src.CadSeqProc.geometry.curve import Curve
+from geometry.curve import Curve
 import matplotlib.patches as patches
 from rich import print
 from loguru import logger

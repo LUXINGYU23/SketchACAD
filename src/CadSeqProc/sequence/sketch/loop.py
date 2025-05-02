@@ -5,13 +5,13 @@ sys.path.append("..")
 sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-4]))
 
 import numpy as np
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.geometry.curve import Curve
-from src.CadSeqProc.geometry.line import Line
-from src.CadSeqProc.geometry.arc import Arc
-from src.CadSeqProc.geometry.circle import Circle
-from src.CadSeqProc.utility.utils import (
+from utility.logger import CLGLogger
+from utility.macro import *
+from geometry.curve import Curve
+from geometry.line import Line
+from geometry.arc import Arc
+from geometry.circle import Circle
+from utility.utils import (
     get_orientation,
     merge_list,
     flatten,

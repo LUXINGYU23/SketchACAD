@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch
 import timm
 from models.layers.dit import DiT_models, TimestepEmbedder
-from src.CadSeqProc.utility.macro import *
+from utility.macro import *
 from models.vqvae import VQVAE
 class MultiViewEncoder(nn.Module):
     def __init__(self, vit_model_name="vit_base_patch16_224", output_dim=256):

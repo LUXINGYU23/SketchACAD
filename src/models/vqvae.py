@@ -13,7 +13,7 @@ from src.models.layers.functional import FeedForwardLayer
 from src.models.layers.embedder import VectorQuantizerEMA, CADSequenceEmbedder, PositionalEncodingSinCos
 from src.models.decoder import CADDecoder, CADDecoderLayer
 from src.models.utils import count_parameters
-from src.CadSeqProc.utility.macro import *
+from utility.macro import *
 from typing import Dict, Optional, Tuple
 
 

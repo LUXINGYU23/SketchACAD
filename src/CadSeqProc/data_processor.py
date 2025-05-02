@@ -41,8 +41,8 @@ from utility.macro import N_BIT, MAX_CAD_SEQUENCE_LENGTH
 from utility.utils import ensure_dir, get_files_scan
 from utility.logger import CLGLogger
 from utility.decorator import measure_performance
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import (
+from utility.macro import *
+from utility.utils import (
     generate_attention_mask,
     ensure_dir,
     hash_map,
@@ -155,25 +155,53 @@ class DataProcessor:
     def process_all_files(self, json_files):
         """处理所有JSON文件"""
         clglogger.info(f"开始处理 {len(json_files)} 个JSON文件")
+    
+        # 添加必要的导入
+        import concurrent.futures
+    
+        # 批处理模式，避免一次性提交太多任务
+        batch_size = min(200000, len(json_files))  # 每批最多300000个文件
+        total_batches = (len(json_files) + batch_size - 1) // batch_size
+    
+        for batch_idx in range(total_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(json_files))
+            batch_files = json_files[start_idx:end_idx]
         
-        # 使用进程池加速处理
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            # 提交处理任务
-            futures = []
-            for json_path in json_files:
-                file_id = self._generate_id()
-                self.id_mapping[json_path] = file_id
-                futures.append(executor.submit(self.process_single_file, json_path, file_id))
+            clglogger.info(f"处理批次 {batch_idx+1}/{total_batches}，文件数量: {len(batch_files)}")
+        
+            # 使用进程池加速处理
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                # 提交处理任务
+                futures = []
+                for json_path in batch_files:
+                    file_id = self._generate_id()
+                    self.id_mapping[json_path] = file_id
+                    futures.append(executor.submit(self.process_single_file, json_path, file_id))
             
-            # 等待并处理结果
-            for future in tqdm(as_completed(futures), desc="处理文件", total=len(futures)):
-                result, is_duplicate = future.result()
-                if result and not is_duplicate:
-                    self.processed_files.append(result)
-                elif is_duplicate:
-                    self.duplicate_count += 1
+                # 等待并处理结果，添加超时
+                timeout_files = 0
+                for future in tqdm(as_completed(futures), desc=f"批次 {batch_idx+1}", total=len(futures)):
+                    try:
+                        # 添加超时机制
+                        result, is_duplicate = future.result(timeout=300)  # 30秒超时
+                        if result and not is_duplicate:
+                            self.processed_files.append(result)
+                        elif is_duplicate:
+                            self.duplicate_count += 1
+                    except concurrent.futures.TimeoutError:
+                        timeout_files += 1
+                        clglogger.error(f"处理文件超时，跳过当前任务，已超时 {timeout_files} 个文件")
+                        continue
+                    except Exception as e:
+                        clglogger.error(f"处理文件出错: {e}")
+                        continue
         
-        clglogger.info(f"成功处理 {len(self.processed_files)} 个文件")
+            # 批次处理完成后，强制进行垃圾回收
+            import gc
+            gc.collect()
+    
+        clglogger.info(f"成功处理 {len(self.processed_files)} 个文件，超时 {timeout_files} 个文件")
     
     def is_duplicate(self, json_data):
         """检查文件是否重复"""
@@ -203,7 +231,7 @@ class DataProcessor:
             
         except Exception as e:
             clglogger.error(f"计算哈希值失败: {e}")
-            return False
+            return True
     
     def process_single_file(self, json_path, file_id):
         """处理单个JSON文件"""
@@ -228,7 +256,7 @@ class DataProcessor:
             self.json_to_vec(json_data, file_id)
             
             # 4. 创建STEP文件并保存到/step目录
-            self.json_to_step(json_data, file_id)
+            # self.json_to_step(json_data, file_id)
             
             # # 5. 创建STL (网格) 文件并保存到/stl目录
             # # 6. 创建PLY (点云) 文件并保存到/ply目录
@@ -424,8 +452,8 @@ def main():
         help=f"量化位数，默认为{N_BIT}"
     )
     parser.add_argument(
-        "--max_workers", type=int, default=8,
-        help="最大工作进程数，默认为8"
+        "--max_workers", type=int, default=12,
+        help="最大工作进程数，默认为12"
     )
     parser.add_argument(
         "--train_ratio", type=float, default=0.8,
@@ -439,7 +467,6 @@ def main():
         "--deduplicate", action="store_true",
         help="启用去重功能，基于JSON内容哈希"
     )
-    
     args = parser.parse_args()
     
     # 配置日志文件

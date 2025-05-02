@@ -5,14 +5,14 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-4]))
 
 
 import numpy as np
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.utils import (
+from utility.logger import CLGLogger
+from utility.utils import (
     float_round,
     int_round,
     polar_parameterization,
     quantize,
 )
-from src.CadSeqProc.utility.macro import *
+from utility.macro import *
 from loguru import logger
 from OCC.Core.gp import gp_Trsf, gp_Vec, gp_Ax3, gp_Dir, gp_Ax1, gp_Pnt
 from rich import print

@@ -6,9 +6,9 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3])) # ROOT_DIR/
 
 from abc import ABC, abstractmethod
 from loguru import logger
-from src.CadSeqProc.utility.utils import point_distance
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.logger import CLGLogger
+from utility.utils import point_distance
+from utility.macro import *
+from utility.logger import CLGLogger
 import numpy as np
 
 

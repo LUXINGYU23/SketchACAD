@@ -9,13 +9,13 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-2]))
 
 import numpy as np
 import argparse
-from src.CadSeqProc.sequence.transformation.extrude_sequence import ExtrudeSequence
-from src.CadSeqProc.sequence.transformation.revolve_sequence import RevolveSequence
-from src.CadSeqProc.sequence.sketch.sketchsequence import SketchSequence
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.decorator import *
-from src.CadSeqProc.utility.utils import (
+from sequence.transformation.extrude_sequence import ExtrudeSequence
+from sequence.transformation.revolve_sequence import RevolveSequence
+from sequence.sketch.sketchsequence import SketchSequence
+from utility.logger import CLGLogger
+from utility.macro import *
+from utility.decorator import *
+from utility.utils import (
     add_axis,
     add_padding,
     brep2mesh,
@@ -45,7 +45,7 @@ import signal
 from contextlib import contextmanager
 import copy
 from OCC.Core import BRepAdaptor
-from src.CadSeqProc.OCCUtils.Topology import Topo
+from OCCUtils.Topology import Topo
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopAbs import TopAbs_FACE
 from OCC.Core.TopoDS import TopoDS_Face, topods

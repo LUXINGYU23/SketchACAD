@@ -11,11 +11,11 @@ sys.path.append(PROJECT_ROOT)
 from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 
 from tqdm import tqdm
-from src.CadSeqProc.utility.decorator import measure_performance
-from src.CadSeqProc.utility.logger import CLGLogger
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import get_files_scan
-from src.CadSeqProc.cad_sequence import CADSequence
+from utility.decorator import measure_performance
+from utility.logger import CLGLogger
+from utility.macro import *
+from utility.utils import get_files_scan
+from cad_sequence import CADSequence
 import argparse
 import multiprocessing
 import json

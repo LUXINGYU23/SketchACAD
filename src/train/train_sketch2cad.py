@@ -22,8 +22,8 @@ from torchvision.transforms.functional import to_tensor
 import io
 from datetime import datetime
 import wandb
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import ensure_dir
+from utility.macro import *
+from utility.utils import ensure_dir
 
 
 
@@ -34,8 +34,8 @@ sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3]))
 from src.models.sketch2cad import Sketch2CAD
 from src.models.vqvae import VQVAE
 from src.train.train_sketch2cad import train_sketch2cad, plot_training_history
-from src.CadSeqProc.utility.macro import *
-from src.CadSeqProc.utility.utils import ensure_dir
+from utility.macro import *
+from utility.utils import ensure_dir
 
 def train_sketch2cad(
     model, 
