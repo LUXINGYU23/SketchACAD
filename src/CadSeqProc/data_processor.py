@@ -11,6 +11,7 @@
 6. 创建网格文件到/stl文件夹
 7. 创建点云文件到/ply文件夹
 8. 按照8:2比例划分训练和测试集
+9. 支持基于JSON内容哈希的去重功能
 """
 
 import os
@@ -70,7 +71,8 @@ class DataProcessor:
         bit=N_BIT,
         max_workers=8,
         train_ratio=0.8,
-        prefix_digits=8
+        prefix_digits=8,
+        deduplicate=False
     ):
         self.input_dir = input_dir
         self.output_dir = output_dir
@@ -81,6 +83,9 @@ class DataProcessor:
         self.file_counter = 0
         self.id_mapping = {}
         self.processed_files = []
+        self.deduplicate = deduplicate
+        self.unique_model_hashes = set()  # 存储唯一模型的哈希值
+        self.duplicate_count = 0  # 跟踪重复文件数量
         
         # 创建输出目录结构
         self._create_directories()
@@ -107,8 +112,12 @@ class DataProcessor:
         
         # 获取所有JSON文件
         try:
-            all_files = get_files_scan(self.input_dir, max_workers=self.max_workers)
-            json_files = [f for f in all_files if f.lower().endswith('.json')]
+            # 使用简单的方法查找所有JSON文件
+            json_files = []
+            for root, _, files in os.walk(self.input_dir):
+                for file in files:
+                    if file.lower().endswith('.json'):
+                        json_files.append(os.path.join(root, file))
             
             if not json_files:
                 clglogger.error(f"在目录 {self.input_dir} 中未找到JSON文件")
@@ -121,6 +130,22 @@ class DataProcessor:
             
             # 生成训练和测试集
             self.split_train_test()
+            
+            # 输出去重统计信息
+            if self.deduplicate:
+                clglogger.info(f"检测到 {self.duplicate_count} 个重复文件")
+                clglogger.info(f"成功处理 {len(self.processed_files)} 个唯一文件")
+                
+                # 保存重复文件信息
+                duplicate_info = {
+                    "total_files": len(json_files),
+                    "unique_files": len(self.processed_files),
+                    "duplicate_files": self.duplicate_count,
+                    "duplicate_percentage": self.duplicate_count / len(json_files) if len(json_files) > 0 else 0
+                }
+                
+                with open(os.path.join(self.output_dir, "duplicate_info.json"), 'w') as f:
+                    json.dump(duplicate_info, f, indent=2)
             
         except Exception as e:
             clglogger.error(f"扫描目录失败: {e}")
@@ -142,11 +167,43 @@ class DataProcessor:
             
             # 等待并处理结果
             for future in tqdm(as_completed(futures), desc="处理文件", total=len(futures)):
-                result = future.result()
-                if result:
+                result, is_duplicate = future.result()
+                if result and not is_duplicate:
                     self.processed_files.append(result)
+                elif is_duplicate:
+                    self.duplicate_count += 1
         
         clglogger.info(f"成功处理 {len(self.processed_files)} 个文件")
+    
+    def is_duplicate(self, json_data):
+        """检查文件是否重复"""
+        if not self.deduplicate:
+            return False
+            
+        try:
+            # 转换为向量表示
+            _, cad_vec, _, _ = CADSequence.json_to_vec(
+                data=json_data,
+                bit=self.bit,
+                padding=True,
+                max_cad_seq_len=MAX_CAD_SEQUENCE_LENGTH,
+            )
+            
+            # 提取参数并计算哈希
+            param = cad_vec[torch.where(cad_vec >= len(END_TOKEN))[0]].tolist()
+            hash_val = hash_map(param)
+            
+            # 检查是否已存在
+            if hash_val in self.unique_model_hashes:
+                return True
+                
+            # 添加到哈希集合
+            self.unique_model_hashes.add(hash_val)
+            return False
+            
+        except Exception as e:
+            clglogger.error(f"计算哈希值失败: {e}")
+            return False
     
     def process_single_file(self, json_path, file_id):
         """处理单个JSON文件"""
@@ -156,6 +213,11 @@ class DataProcessor:
             # 1. 读取JSON文件
             with open(json_path, 'r') as f:
                 json_data = json.load(f)
+                
+            # 检查是否重复
+            if self.is_duplicate(json_data):
+                clglogger.info(f"文件 {json_path} 被识别为重复，跳过处理")
+                return None, True
             
             # 2. 复制到/json目录
             json_output_path = os.path.join(self.output_dir, "json", f"{file_id}.json")
@@ -172,13 +234,13 @@ class DataProcessor:
             # # 6. 创建PLY (点云) 文件并保存到/ply目录
             # self.create_mesh_and_pointcloud(json_data, file_id)
             
-            return file_id
+            return file_id, False
             
         except Exception as e:
             clglogger.error(f"处理文件 {json_path} 失败: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return None, False
     
     def json_to_vec(self, json_data, file_id):
         """将JSON转换为向量表示并保存"""
@@ -373,6 +435,10 @@ def main():
         "--prefix_digits", type=int, default=8,
         help="ID前缀位数，默认为8"
     )
+    parser.add_argument(
+        "--deduplicate", action="store_true",
+        help="启用去重功能，基于JSON内容哈希"
+    )
     
     args = parser.parse_args()
     
@@ -391,7 +457,8 @@ def main():
         bit=args.bit,
         max_workers=args.max_workers,
         train_ratio=args.train_ratio,
-        prefix_digits=args.prefix_digits
+        prefix_digits=args.prefix_digits,
+        deduplicate=args.deduplicate
     )
     
     processor.scan_and_process_files()

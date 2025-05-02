@@ -16,15 +16,17 @@ import argparse
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-
+# 获取当前脚本路径
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 添加项目根目录到Python路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, "../../.."))  # 指向SketchACAD根目录
+sys.path.append(PROJECT_ROOT)
 
-from src.CadSeqProc.cad_sequence import CADSequence
-from src.CadSeqProc.utility.macro import N_BIT, EXTRUDE_FLAG_START, EXTRUDE_FLAG_RANGE, REVOLVE_FLAG_START, REVOLVE_FLAG_RANGE, PADDING_FLAG
-from src.CadSeqProc.utility.utils import ensure_dir, get_files_scan
-from src.CadSeqProc.utility.decorator import measure_performance
-from src.CadSeqProc.utility.logger import CLGLogger
+from cad_sequence import CADSequence
+from utility.macro import N_BIT, EXTRUDE_FLAG_START, EXTRUDE_FLAG_RANGE, REVOLVE_FLAG_START, REVOLVE_FLAG_RANGE, PADDING_FLAG
+from utility.utils import ensure_dir, get_files_scan
+from utility.decorator import measure_performance
+from utility.logger import CLGLogger
 
 # 导入OpenCascade相关库，用于渲染
 from OCC.Display.SimpleGui import init_display
