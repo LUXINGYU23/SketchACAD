@@ -20,3 +20,5 @@
         gradio
         open3d
         scikit-learn
+        timm
+        wandb
