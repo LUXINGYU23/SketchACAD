@@ -2,3 +2,7 @@ data
 test_results
 .vscode
 debug_output
+logs
+checkpoints
+.ipynb_checkpoints
+__pycache__

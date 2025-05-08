@@ -25,7 +25,8 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+import concurrent
 import logging
 import multiprocessing
 import platform
@@ -83,6 +84,7 @@ class DataProcessor:
         self.file_counter = 0
         self.id_mapping = {}
         self.processed_files = []
+        self.processed_json_files = []  # 新增：存储处理后的JSON文件路径
         self.deduplicate = deduplicate
         self.unique_model_hashes = set()  # 存储唯一模型的哈希值
         self.duplicate_count = 0  # 跟踪重复文件数量
@@ -125,8 +127,13 @@ class DataProcessor:
             
             clglogger.info(f"找到 {len(json_files)} 个JSON文件")
             
-            # 处理所有JSON文件
-            self.process_all_files(json_files)
+            # 第一阶段：扫描、去重、重命名和保存JSON文件
+            clglogger.info("第一阶段：扫描、去重、重命名和保存JSON文件")
+            self.process_json_files(json_files)
+            
+            # 第二阶段：将JSON文件转换为向量表示
+            clglogger.info("第二阶段：将JSON文件转换为向量表示")
+            self.convert_json_to_vectors()
             
             # 生成训练和测试集
             self.split_train_test()
@@ -152,56 +159,145 @@ class DataProcessor:
             import traceback
             traceback.print_exc()
     
-    def process_all_files(self, json_files):
-        """处理所有JSON文件"""
+    def process_json_files(self, json_files):
+        """第一阶段：扫描、去重、重命名和保存JSON文件"""
         clglogger.info(f"开始处理 {len(json_files)} 个JSON文件")
+        
+        processed_count = 0
+        
+        for json_path in tqdm(json_files, desc="处理JSON文件"):
+            try:
+                # 读取JSON文件
+                with open(json_path, 'r') as f:
+                    json_data = json.load(f)
+                
+                # 检查是否重复
+                is_duplicate = False
+                if self.deduplicate:
+                    is_duplicate = self.check_duplicate(json_data)
+                
+                if is_duplicate:
+                    self.duplicate_count += 1
+                    clglogger.info(f"文件 {json_path} 被识别为重复，跳过处理")
+                    continue
+                
+                # 生成唯一ID
+                file_id = self._generate_id()
+                self.id_mapping[json_path] = file_id
+                
+                # 保存到JSON目录
+                json_output_path = os.path.join(self.output_dir, "json", f"{file_id}.json")
+                with open(json_output_path, 'w') as f:
+                    json.dump(json_data, f, indent=2)
+                
+                # 添加到已处理文件列表
+                self.processed_files.append(file_id)
+                self.processed_json_files.append(json_output_path)
+                
+                processed_count += 1
+                if processed_count % 1000 == 0:
+                    clglogger.info(f"已处理 {processed_count} 个JSON文件")
+                    
+            except Exception as e:
+                clglogger.error(f"处理文件 {json_path} 失败: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        clglogger.info(f"第一阶段完成：成功处理 {processed_count} 个JSON文件，发现 {self.duplicate_count} 个重复文件")
     
-        # 添加必要的导入
-        import concurrent.futures
+    def check_duplicate(self, json_data):
+        """检查文件是否重复"""
+        try:
+            # 转换为向量表示
+            _, cad_vec, _, _ = CADSequence.json_to_vec(
+                data=json_data,
+                bit=self.bit,
+                padding=True,
+                max_cad_seq_len=MAX_CAD_SEQUENCE_LENGTH,
+            )
+            
+            # 提取参数并计算哈希
+            param = cad_vec[torch.where(cad_vec >= len(END_TOKEN))[0]].tolist()
+            hash_val = hash_map(param)
+            
+            # 检查是否已存在
+            if hash_val in self.unique_model_hashes:
+                return True
+                
+            # 添加到哈希集合
+            self.unique_model_hashes.add(hash_val)
+            return False
+            
+        except Exception as e:
+            clglogger.error(f"计算哈希值失败: {e}")
+            return False  # 如果计算失败，不视为重复
     
-        # 批处理模式，避免一次性提交太多任务
-        batch_size = min(200000, len(json_files))  # 每批最多300000个文件
-        total_batches = (len(json_files) + batch_size - 1) // batch_size
-    
+    def convert_json_to_vectors(self):
+        """第二阶段：将JSON文件转换为向量表示"""
+        if not self.processed_json_files:
+            clglogger.warning("没有JSON文件需要转换")
+            return
+        
+        clglogger.info(f"开始将 {len(self.processed_json_files)} 个JSON文件转换为向量表示")
+        
+        # 批处理模式
+        batch_size = min(100000, len(self.processed_json_files))  # 每批最多100000个文件
+        total_batches = (len(self.processed_json_files) + batch_size - 1) // batch_size
+        
         for batch_idx in range(total_batches):
             start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(json_files))
-            batch_files = json_files[start_idx:end_idx]
-        
+            end_idx = min((batch_idx + 1) * batch_size, len(self.processed_json_files))
+            batch_files = self.processed_json_files[start_idx:end_idx]
+            
             clglogger.info(f"处理批次 {batch_idx+1}/{total_batches}，文件数量: {len(batch_files)}")
-        
+            
             # 使用进程池加速处理
             with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
                 # 提交处理任务
                 futures = []
                 for json_path in batch_files:
-                    file_id = self._generate_id()
-                    self.id_mapping[json_path] = file_id
-                    futures.append(executor.submit(self.process_single_file, json_path, file_id))
-            
-                # 等待并处理结果，添加超时
-                timeout_files = 0
+                    file_id = os.path.basename(json_path).split('.')[0]  # 从文件名获取ID
+                    futures.append(executor.submit(self.process_vector_conversion, json_path, file_id))
+                
+                # 等待并处理结果
+                success_count = 0
+                error_count = 0
                 for future in tqdm(as_completed(futures), desc=f"批次 {batch_idx+1}", total=len(futures)):
                     try:
-                        # 添加超时机制
-                        result, is_duplicate = future.result(timeout=300)  # 30秒超时
-                        if result and not is_duplicate:
-                            self.processed_files.append(result)
-                        elif is_duplicate:
-                            self.duplicate_count += 1
+                        result = future.result(timeout=300)  # 300秒超时
+                        if result:
+                            success_count += 1
                     except concurrent.futures.TimeoutError:
-                        timeout_files += 1
-                        clglogger.error(f"处理文件超时，跳过当前任务，已超时 {timeout_files} 个文件")
-                        continue
+                        error_count += 1
+                        clglogger.error(f"转换向量超时，已超时 {error_count} 个文件")
                     except Exception as e:
-                        clglogger.error(f"处理文件出错: {e}")
-                        continue
-        
+                        error_count += 1
+                        clglogger.error(f"转换向量出错: {e}")
+            
             # 批次处理完成后，强制进行垃圾回收
             import gc
             gc.collect()
+            
+            clglogger.info(f"批次 {batch_idx+1} 完成: 成功 {success_count} 个，失败 {error_count} 个")
+        
+        clglogger.info(f"向量转换完成")
     
-        clglogger.info(f"成功处理 {len(self.processed_files)} 个文件，超时 {timeout_files} 个文件")
+    def process_vector_conversion(self, json_path, file_id):
+        """处理单个文件的向量转换"""
+        try:
+            # 读取JSON文件
+            with open(json_path, 'r') as f:
+                json_data = json.load(f)
+            
+            # 转换为向量表示
+            result = self.json_to_vec(json_data, file_id)
+            return result
+            
+        except Exception as e:
+            clglogger.error(f"处理向量转换失败 {json_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def is_duplicate(self, json_data):
         """检查文件是否重复"""

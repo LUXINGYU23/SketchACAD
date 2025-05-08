@@ -11,7 +11,7 @@ END_TOKEN=["PADDING", "START", "END_SKETCH",
 END_PAD=8  # 原来是7，加入了END_REVOLVE后变为8
 BOOLEAN_PAD=4
 
-MAX_CAD_SEQUENCE_LENGTH=289
+MAX_CAD_SEQUENCE_LENGTH=144
 
 SKETCH_TOKEN = ["PADDING", "START", "END_SKETCH",
                 "END_FACE", "END_LOOP", "END_CURVE", "CURVE"]
@@ -56,7 +56,7 @@ PADDING_FLAG = 28
 SKETCH_FLAG = 0
 CAD_CLASS_INFO = {
     'one_hot_size': END_PAD+BOOLEAN_PAD+2**N_BIT,  #8+4+256=268
-    'index_size': MAX_EXTRUSION+MAX_REVOLVE+1, # +1 for padding  10+10+1=21
-    'flag_size': ONE_EXT_SEQ_LENGTH+ONE_REV_SEQ_LENGTH+1, # +1 for padding 10+17+1=28
+    'index_size': MAX_EXTRUSION+MAX_REVOLVE+2, # +1 for padding  10+10+1=21
+    'flag_size': ONE_EXT_SEQ_LENGTH+ONE_REV_SEQ_LENGTH+2, # +1 for padding 10+17+1=28
 }
 

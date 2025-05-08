@@ -3,8 +3,8 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from operator import itemgetter
-from .layer_utils import *
-from .functional import multi_head_attention_forward
+from src.models.layers.layer_utils import *
+from src.models.layers.functional import multi_head_attention_forward
 from torch.nn.init import xavier_normal_, xavier_uniform_, constant_
 from torch.nn.parameter import Parameter
 import torch.nn as nn
@@ -164,9 +164,9 @@ class MultiHeadAttention(nn.Module):
               N is the target sequence length, S is the source sequence length.
         """
 
-        query = query.transpose(0, 1)  # (N,B,E)
-        key = key.transpose(0, 1)  # (N,B,E)
-        value = value.transpose(0, 1)  # (N,B,E)
+        # query = query.transpose(0, 1)  # (N,B,E)
+        # key = key.transpose(0, 1)  # (N,B,E)
+        # value = value.transpose(0, 1)  # (N,B,E)
 
         # Atttention mask is same for all the batches
         if attn_mask is not None and attn_mask.dim() > 2 and not use_3d:

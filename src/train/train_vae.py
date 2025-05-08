@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import io
 from PIL import Image
+from typing import List, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,9 +25,9 @@ sys.path.append("..")
 sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3]))
 
 # 导入自定义模块
-from src.models.vqvae import VQVAE
-from utility.macro import *
-from utility.utils import ensure_dir
+from src.models.vae import VAE  # 更改导入为VAE模型
+from src.CadSeqProc.utility.macro import *
+from src.CadSeqProc.utility.utils import ensure_dir
 
 # 尝试导入wandb
 try:
@@ -37,19 +38,46 @@ except ImportError:
     print("未安装wandb，将不使用wandb进行日志记录")
 
 
+# 重用CADSequenceDataset类
 class CADSequenceDataset(Dataset):
     """CAD序列数据集类，用于加载经过预处理的CAD序列向量"""
     
     def __init__(self, data_dir, file_list):
         """
-        初始化数据集
+        初始化数据集，并过滤掉超过MAX_CAD_SEQUENCE_LENGTH长度的样本
         
         Args:
             data_dir: 数据根目录，包含vec子目录
             file_list: 文件ID列表
         """
         self.data_dir = Path(data_dir)
-        self.file_list = file_list
+        
+        # 过滤超出MAX_CAD_SEQUENCE_LENGTH的样本
+        filtered_list = []
+        filtered_count = 0
+        
+        print(f"开始过滤超过{MAX_CAD_SEQUENCE_LENGTH}长度的样本...")
+        for file_id in tqdm(file_list, desc="过滤样本"):
+            # 加载CAD序列向量
+            cad_data_path = self.data_dir / "vec" / f"{file_id}.pth"
+            try:
+                cad_data = torch.load(cad_data_path, map_location='cpu')
+                cad_vec_length = cad_data["vec"]["cad_vec"].shape[0]
+                flag_vec_length = cad_data["vec"]["flag_vec"].shape[0]
+                index_vec_length = cad_data["vec"]["index_vec"].shape[0]
+                
+                if cad_vec_length <= MAX_CAD_SEQUENCE_LENGTH and \
+                   flag_vec_length <= MAX_CAD_SEQUENCE_LENGTH and \
+                   index_vec_length <= MAX_CAD_SEQUENCE_LENGTH:
+                    filtered_list.append(file_id)
+                else:
+                    filtered_count += 1
+            except Exception as e:
+                print(f"加载文件 {file_id} 时出错: {e}")
+                filtered_count += 1
+                
+        self.file_list = filtered_list
+        print(f"过滤完成: 共过滤掉 {filtered_count} 个样本，保留 {len(filtered_list)} 个样本")
         
     def __len__(self):
         return len(self.file_list)
@@ -83,44 +111,76 @@ def compute_cad_reconstruction_loss(output, target_vec, mask=None):
     Args:
         output: 模型输出，形状为[B, L, 2, C]
         target_vec: 目标CAD向量，形状为[B, L, 2]
-        mask: 可选的掩码，排除填充位置
+        mask: 可选的掩码，形状为[B, L] 或 [B, L, 2]
         
     Returns:
         loss: 重建损失值
     """
     # 分别计算X和Y坐标的交叉熵损失
     loss_x = F.cross_entropy(
-        output[:, :, 0].contiguous().view(-1, output.size(-1)),
-        target_vec[:, :, 0].contiguous().view(-1),
+        output[:, :, 0].contiguous().view(-1, output.size(-1)).float(),
+        target_vec[:, :, 0].contiguous().view(-1).long(),
         reduction='none'
     )
     
     loss_y = F.cross_entropy(
-        output[:, :, 1].contiguous().view(-1, output.size(-1)),
-        target_vec[:, :, 1].contiguous().view(-1),
+        output[:, :, 1].contiguous().view(-1, output.size(-1)).float(),
+        target_vec[:, :, 1].contiguous().view(-1).long(),
         reduction='none'
     )
     
-    # 组合损失
-    loss = loss_x + loss_y
-    
-    # 应用掩码（如果提供）
+    # 处理掩码
     if mask is not None:
-        flat_mask = mask.view(-1)
-        # 仅计算非填充位置的损失
-        loss = loss * (~flat_mask)
-        n_valid = (~flat_mask).sum()
-        if n_valid > 0:
-            loss = loss.sum() / n_valid
+        # 检查掩码维度
+        if mask.dim() > 2:
+            # 如果掩码是[B, L, 2]形状，则分别应用于x和y的损失
+            mask_x = mask[:, :, 0].reshape(-1)  # [B*L]
+            mask_y = mask[:, :, 1].reshape(-1)  # [B*L]
+            
+            # 应用掩码
+            loss_x = loss_x * (~mask_x)
+            loss_y = loss_y * (~mask_y)
         else:
-            loss = loss.sum()
+            # 如果掩码是[B, L]形状，直接应用
+            flat_mask = mask.reshape(-1)  # [B*L]
+            loss_x = loss_x * (~flat_mask)
+            loss_y = loss_y * (~flat_mask)
+        
+        # 计算有效位置数量
+        if mask.dim() > 2:
+            n_valid_x = (~mask_x).sum()
+            n_valid_y = (~mask_y).sum()
+            
+            # 归一化损失
+            if n_valid_x > 0:
+                loss_x = loss_x.sum() / n_valid_x
+            else:
+                loss_x = loss_x.sum()
+                
+            if n_valid_y > 0:
+                loss_y = loss_y.sum() / n_valid_y
+            else:
+                loss_y = loss_y.sum()
+        else:
+            n_valid = (~flat_mask).sum()
+            if n_valid > 0:
+                loss_x = loss_x.sum() / n_valid
+                loss_y = loss_y.sum() / n_valid
+            else:
+                loss_x = loss_x.sum()
+                loss_y = loss_y.sum()
     else:
-        loss = loss.mean()
+        # 无掩码，直接平均
+        loss_x = loss_x.mean()
+        loss_y = loss_y.mean()
+    
+    # 组合最终损失
+    loss = loss_x + loss_y
     
     return loss
 
 
-def train_vqvae(
+def train_vae(
     model, 
     train_loader, 
     val_loader, 
@@ -135,13 +195,18 @@ def train_vqvae(
     save_interval=5,
     use_wandb=True,
     use_tensorboard=True,
-    beta=1.0,  # 重建损失的权重，相对于量化损失
+    early_stopping_patience=20,  # 早停的耐心值
+    early_stopping_delta=0.0001,  # 最小改善阈值
+    gradient_accumulation_steps=1,  # 梯度累积步数
+    kl_weight=0.1,  # KL损失权重
+    kl_annealing=False,  # KL损失权重是否使用退火
+    kl_annealing_epochs=50,  # KL退火的轮数
 ):
     """
-    训练VQVAE模型并记录训练过程
+    训练VAE模型并记录训练过程
     
     Args:
-        model: VQVAE模型
+        model: VAE模型
         train_loader: 训练数据加载器
         val_loader: 验证数据加载器
         optimizer: 优化器
@@ -155,13 +220,18 @@ def train_vqvae(
         save_interval: 保存模型的间隔（epoch数）
         use_wandb: 是否使用wandb记录训练过程
         use_tensorboard: 是否使用TensorBoard记录训练过程
-        beta: 重建损失权重，相对于量化损失
+        early_stopping_patience: 早停的耐心值，连续多少个epoch验证损失没有改善则停止训练
+        early_stopping_delta: 验证损失改善的最小值，小于此值不算作改善
+        gradient_accumulation_steps: 梯度累积步数，每多少步更新一次参数
+        kl_weight: KL损失权重
+        kl_annealing: 是否使用KL退火
+        kl_annealing_epochs: KL退火的轮数
     """
     model.train()
     
     # 实验名称，如果未指定则使用时间戳
     if exp_name is None:
-        exp_name = f"vqvae_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        exp_name = f"vae_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # 创建保存目录
     model_save_dir = os.path.join(save_dir, exp_name)
@@ -181,22 +251,26 @@ def train_vqvae(
             "learning_rate": optimizer.param_groups[0]['lr'],
             "model": model.__class__.__name__,
             "scheduler": scheduler.__class__.__name__ if scheduler else "None",
-            "beta": beta,
+            "early_stopping_patience": early_stopping_patience,
+            "early_stopping_delta": early_stopping_delta,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "effective_batch_size": train_loader.batch_size * gradient_accumulation_steps if hasattr(train_loader, 'batch_size') else 'unknown',
+            "kl_weight": kl_weight,
+            "kl_annealing": kl_annealing,
+            "kl_annealing_epochs": kl_annealing_epochs if kl_annealing else "N/A",
         })
     
     # 记录训练开始时间
     start_time = time.time()
     best_val_loss = float('inf')
     
+    # 早停相关变量
+    early_stopping_counter = 0
+    early_stopped = False
+    
     # 训练指标记录
     train_losses = []
-    train_recon_losses = []
-    train_vq_losses = []
-    train_perplexities = []
     val_losses = []
-    val_recon_losses = []
-    val_vq_losses = []
-    val_perplexities = []
     learning_rates = []
     
     for epoch in range(num_epochs):
@@ -204,12 +278,21 @@ def train_vqvae(
         epoch_start_time = time.time()
         total_loss = 0.0
         total_recon_loss = 0.0
-        total_vq_loss = 0.0
-        total_perplexity = 0.0
+        total_kl_loss = 0.0
         num_batches = 0
         
+        # KL权重退火
+        if kl_annealing:
+            # 线性增加KL权重，从0到设定值
+            current_kl_weight = kl_weight * min(1.0, epoch / kl_annealing_epochs)
+        else:
+            current_kl_weight = kl_weight
+            
         # 创建进度条
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        
+        # 重置优化器的梯度
+        optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(pbar):
             # 获取输入数据
@@ -224,37 +307,41 @@ def train_vqvae(
                 'key_padding_mask': batch['mask_dict']['key_padding_mask'].to(device)
             }
             
-            # 清除梯度
-            optimizer.zero_grad()
-            
-            # 前向传播
-            output, vq_loss, perplexity, _ = model(vec_dict, mask_dict)
+            # 前向传播 - 注意VAE返回四个值
+            output, mu, log_var, metrics = model(vec_dict, mask_dict)
             
             # 计算重建损失
             recon_loss = compute_cad_reconstruction_loss(
                 output, vec_dict['cad_vec'], mask_dict['key_padding_mask']
             )
             
-            # 总损失 = beta * 重建损失 + 量化损失
-            loss = beta * recon_loss + vq_loss
+            # 计算KL散度损失
+            kl_loss = model.calc_kl_loss(mu, log_var)
             
-            # 反向传播和优化
+            # 总损失 = 重建损失 + KL权重 * KL损失，并按梯度累积步数缩放
+            loss = (recon_loss + current_kl_weight * kl_loss) / gradient_accumulation_steps
+            
+            # 反向传播
             loss.backward()
-            optimizer.step()
             
-            # 记录损失
-            total_loss += loss.item()
+            # 仅在累积了指定步数的梯度后更新参数
+            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1 == len(train_loader)):
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            # 记录损失（使用未缩放的损失值）
+            total_loss += (recon_loss + current_kl_weight * kl_loss).item()
             total_recon_loss += recon_loss.item()
-            total_vq_loss += vq_loss.item()
-            total_perplexity += perplexity.item()
+            total_kl_loss += kl_loss.item()
             num_batches += 1
             
             # 更新进度条显示当前批次损失
             pbar.set_postfix({
-                'loss': loss.item(),
+                'loss': (recon_loss + current_kl_weight * kl_loss).item(),
                 'recon': recon_loss.item(),
-                'vq': vq_loss.item(),
-                'ppl': perplexity.item()
+                'kl': kl_loss.item(),
+                'kl_w': current_kl_weight,
+                'acc_step': (batch_idx % gradient_accumulation_steps) + 1
             })
             
             # 记录训练过程指标
@@ -262,31 +349,26 @@ def train_vqvae(
                 global_step = epoch * len(train_loader) + batch_idx
                 
                 if use_tensorboard:
-                    writer.add_scalar('train/batch_loss', loss.item(), global_step)
+                    writer.add_scalar('train/batch_loss', (recon_loss + current_kl_weight * kl_loss).item(), global_step)
                     writer.add_scalar('train/batch_recon_loss', recon_loss.item(), global_step)
-                    writer.add_scalar('train/batch_vq_loss', vq_loss.item(), global_step)
-                    writer.add_scalar('train/batch_perplexity', perplexity.item(), global_step)
+                    writer.add_scalar('train/batch_kl_loss', kl_loss.item(), global_step)
+                    writer.add_scalar('train/kl_weight', current_kl_weight, global_step)
                     writer.add_scalar('train/learning_rate', optimizer.param_groups[0]['lr'], global_step)
                 
                 if use_wandb and WANDB_AVAILABLE:
                     wandb.log({
-                        'train/batch_loss': loss.item(),
+                        'train/batch_loss': (recon_loss + current_kl_weight * kl_loss).item(),
                         'train/batch_recon_loss': recon_loss.item(),
-                        'train/batch_vq_loss': vq_loss.item(),
-                        'train/batch_perplexity': perplexity.item(),
+                        'train/batch_kl_loss': kl_loss.item(),
+                        'train/kl_weight': current_kl_weight,
                         'train/learning_rate': optimizer.param_groups[0]['lr']
                     }, step=global_step)
         
         # 计算平均训练损失
         avg_train_loss = total_loss / num_batches
         avg_train_recon_loss = total_recon_loss / num_batches
-        avg_train_vq_loss = total_vq_loss / num_batches
-        avg_train_perplexity = total_perplexity / num_batches
-        
+        avg_train_kl_loss = total_kl_loss / num_batches
         train_losses.append(avg_train_loss)
-        train_recon_losses.append(avg_train_recon_loss)
-        train_vq_losses.append(avg_train_vq_loss)
-        train_perplexities.append(avg_train_perplexity)
         
         # 保存当前学习率
         current_lr = optimizer.param_groups[0]['lr']
@@ -296,8 +378,7 @@ def train_vqvae(
         model.eval()
         val_loss = 0.0
         val_recon_loss = 0.0
-        val_vq_loss = 0.0
-        val_perplexity = 0.0
+        val_kl_loss = 0.0
         val_batch_count = 0
         
         with torch.no_grad():
@@ -315,39 +396,31 @@ def train_vqvae(
                 }
                 
                 # 前向传播
-                val_output, val_vq_loss, val_ppl, _ = model(val_vec_dict, val_mask_dict)
+                val_output, val_mu, val_log_var, val_metrics = model(val_vec_dict, val_mask_dict)
                 
                 # 计算重建损失
                 val_recon = compute_cad_reconstruction_loss(
                     val_output, val_vec_dict['cad_vec'], val_mask_dict['key_padding_mask']
                 )
                 
+                # 计算KL散度损失
+                val_kl = model.calc_kl_loss(val_mu, val_log_var)
+                
                 # 总损失
-                val_total_loss = beta * val_recon + val_vq_loss
+                val_total = val_recon + current_kl_weight * val_kl
                 
-                val_loss += val_total_loss.item()
+                val_loss += val_total.item()
                 val_recon_loss += val_recon.item()
-                val_vq_loss += val_vq_loss.item()
-                val_perplexity += val_ppl.item()
+                val_kl_loss += val_kl.item()
                 val_batch_count += 1
-                
-                # 如果是第一个批次并且是第一个epoch，保存一些重建样本进行可视化
-                if val_batch_count == 1 and epoch == 0:
-                    # 这里可以添加一些可视化代码，比如保存重建的CAD序列
-                    pass
         
         # 计算验证集平均损失
         avg_val_loss = val_loss / val_batch_count
         avg_val_recon_loss = val_recon_loss / val_batch_count
-        avg_val_vq_loss = val_vq_loss / val_batch_count
-        avg_val_perplexity = val_perplexity / val_batch_count
-        
+        avg_val_kl_loss = val_kl_loss / val_batch_count
         val_losses.append(avg_val_loss)
-        val_recon_losses.append(avg_val_recon_loss)
-        val_vq_losses.append(avg_val_vq_loss)
-        val_perplexities.append(avg_val_perplexity)
         
-        # 学习率调整
+        # 学习率调度器
         if scheduler is not None:
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(avg_val_loss)
@@ -361,31 +434,31 @@ def train_vqvae(
         if use_tensorboard:
             writer.add_scalar('train/epoch_loss', avg_train_loss, epoch)
             writer.add_scalar('train/epoch_recon_loss', avg_train_recon_loss, epoch)
-            writer.add_scalar('train/epoch_vq_loss', avg_train_vq_loss, epoch)
-            writer.add_scalar('train/epoch_perplexity', avg_train_perplexity, epoch)
+            writer.add_scalar('train/epoch_kl_loss', avg_train_kl_loss, epoch)
             writer.add_scalar('val/epoch_loss', avg_val_loss, epoch)
             writer.add_scalar('val/epoch_recon_loss', avg_val_recon_loss, epoch)
-            writer.add_scalar('val/epoch_vq_loss', avg_val_vq_loss, epoch)
-            writer.add_scalar('val/epoch_perplexity', avg_val_perplexity, epoch)
+            writer.add_scalar('val/epoch_kl_loss', avg_val_kl_loss, epoch)
             writer.add_scalar('train/learning_rate', current_lr, epoch)
+            writer.add_scalar('train/kl_weight', current_kl_weight, epoch)
             writer.add_scalar('time/epoch_seconds', epoch_time, epoch)
+            writer.add_scalar('early_stopping/counter', early_stopping_counter, epoch)
         
         if use_wandb and WANDB_AVAILABLE:
             wandb.log({
                 'train/epoch_loss': avg_train_loss,
                 'train/epoch_recon_loss': avg_train_recon_loss,
-                'train/epoch_vq_loss': avg_train_vq_loss,
-                'train/epoch_perplexity': avg_train_perplexity,
+                'train/epoch_kl_loss': avg_train_kl_loss,
                 'val/epoch_loss': avg_val_loss,
                 'val/epoch_recon_loss': avg_val_recon_loss,
-                'val/epoch_vq_loss': avg_val_vq_loss,
-                'val/epoch_perplexity': avg_val_perplexity,
+                'val/epoch_kl_loss': avg_val_kl_loss,
                 'train/learning_rate': current_lr,
+                'train/kl_weight': current_kl_weight,
                 'time/epoch_seconds': epoch_time,
+                'early_stopping/counter': early_stopping_counter,
             }, step=epoch)
         
         # 保存最佳模型
-        if avg_val_loss < best_val_loss:
+        if avg_val_loss < best_val_loss - early_stopping_delta:
             best_val_loss = avg_val_loss
             best_model_path = os.path.join(model_save_dir, f"best_model.pth")
             torch.save({
@@ -394,10 +467,27 @@ def train_vqvae(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'train_loss': avg_train_loss,
+                'train_recon_loss': avg_train_recon_loss,
+                'train_kl_loss': avg_train_kl_loss,
                 'val_loss': avg_val_loss,
+                'val_recon_loss': avg_val_recon_loss,
+                'val_kl_loss': avg_val_kl_loss,
+                'kl_weight': current_kl_weight,
             }, best_model_path)
             
-            print(f"保存最佳模型，验证损失: {avg_val_loss:.6f}")
+            print(f"保存最佳模型，验证损失: {avg_val_loss:.6f} (重建: {avg_val_recon_loss:.6f}, KL: {avg_val_kl_loss:.6f})")
+            # 重置早停计数器
+            early_stopping_counter = 0
+        else:
+            # 验证损失没有改善，早停计数器加1
+            early_stopping_counter += 1
+            print(f"验证损失未改善，早停计数器: {early_stopping_counter}/{early_stopping_patience}")
+            
+            # 检查是否应该早停
+            if early_stopping_counter >= early_stopping_patience:
+                print(f"早停! 验证损失已经 {early_stopping_patience} 个epoch没有改善")
+                early_stopped = True
+                break
         
         # 定期保存检查点
         if (epoch + 1) % save_interval == 0:
@@ -408,95 +498,43 @@ def train_vqvae(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'train_loss': avg_train_loss,
+                'train_recon_loss': avg_train_recon_loss,
+                'train_kl_loss': avg_train_kl_loss,
                 'val_loss': avg_val_loss,
+                'val_recon_loss': avg_val_recon_loss,
+                'val_kl_loss': avg_val_kl_loss,
+                'kl_weight': current_kl_weight,
             }, checkpoint_path)
         
         # 打印训练信息
         print(f"Epoch {epoch+1}/{num_epochs} | "
-              f"Train Loss: {avg_train_loss:.6f} | "
-              f"Val Loss: {avg_val_loss:.6f} | "
-              f"Train Recon: {avg_train_recon_loss:.6f} | "
-              f"Val Recon: {avg_val_recon_loss:.6f} | "
-              f"Train VQ: {avg_train_vq_loss:.6f} | "
-              f"Val VQ: {avg_val_vq_loss:.6f} | "
-              f"Train PPL: {avg_train_perplexity:.2f} | "
-              f"Val PPL: {avg_val_perplexity:.2f} | "
+              f"Train Loss: {avg_train_loss:.6f} (重建: {avg_train_recon_loss:.6f}, KL: {avg_train_kl_loss:.6f}) | "
+              f"Val Loss: {avg_val_loss:.6f} (重建: {avg_val_recon_loss:.6f}, KL: {avg_val_kl_loss:.6f}) | "
+              f"KL权重: {current_kl_weight:.4f} | "
               f"LR: {current_lr:.8f} | "
               f"Time: {epoch_time:.2f}s")
     
     # 训练结束，保存最终模型
     final_model_path = os.path.join(model_save_dir, f"final_model.pth")
     torch.save({
-        'epoch': num_epochs,
+        'epoch': epoch,  # 使用实际训练的轮数
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
         'train_loss': avg_train_loss,
+        'train_recon_loss': avg_train_recon_loss,
+        'train_kl_loss': avg_train_kl_loss,
         'val_loss': avg_val_loss,
+        'val_recon_loss': avg_val_recon_loss,
+        'val_kl_loss': avg_val_kl_loss,
+        'kl_weight': current_kl_weight,
+        'early_stopped': early_stopped,
     }, final_model_path)
     
-    # 绘制损失曲线
-    plt.figure(figsize=(15, 10))
-    
-    # 训练和验证总损失
-    plt.subplot(2, 2, 1)
-    plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss')
-    plt.plot(range(1, num_epochs+1), val_losses, label='Val Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title('总损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 重建损失
-    plt.subplot(2, 2, 2)
-    plt.plot(range(1, num_epochs+1), train_recon_losses, label='Train Recon Loss')
-    plt.plot(range(1, num_epochs+1), val_recon_losses, label='Val Recon Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Recon Loss')
-    plt.title('重建损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 量化损失
-    plt.subplot(2, 2, 3)
-    plt.plot(range(1, num_epochs+1), train_vq_losses, label='Train VQ Loss')
-    plt.plot(range(1, num_epochs+1), val_vq_losses, label='Val VQ Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('VQ Loss')
-    plt.title('量化损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 困惑度
-    plt.subplot(2, 2, 4)
-    plt.plot(range(1, num_epochs+1), train_perplexities, label='Train Perplexity')
-    plt.plot(range(1, num_epochs+1), val_perplexities, label='Val Perplexity')
-    plt.xlabel('Epochs')
-    plt.ylabel('Perplexity')
-    plt.title('码本使用率 (Perplexity)')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.tight_layout()
-    
-    # 保存图表
-    plt.savefig(os.path.join(model_save_dir, 'training_plots.png'))
-    
-    # 保存到tensorboard
-    if use_tensorboard:
-        figure_buf = io.BytesIO()
-        plt.savefig(figure_buf, format='png')
-        figure_buf.seek(0)
-        img = Image.open(figure_buf)
-        img_tensor = to_tensor(img)
-        writer.add_image('training/loss_plots', img_tensor)
-        writer.close()
-    
-    # 保存到wandb
-    if use_wandb and WANDB_AVAILABLE:
-        wandb.log({"training/loss_plots": wandb.Image(plt)})
-        wandb.finish()
+    # 将所有张量转换为Python标量
+    train_losses = [x if isinstance(x, (int, float)) else x.cpu().item() for x in train_losses]
+    val_losses = [x if isinstance(x, (int, float)) else x.cpu().item() for x in val_losses]
+    learning_rates = [x if isinstance(x, (int, float)) else x.cpu().item() for x in learning_rates]
     
     # 计算总训练时间
     total_time = time.time() - start_time
@@ -504,121 +542,46 @@ def train_vqvae(
     print(f"最佳验证损失: {best_val_loss:.6f}")
     print(f"模型已保存到: {model_save_dir}")
     
+    # 返回训练历史
     return {
         'train_losses': train_losses,
-        'train_recon_losses': train_recon_losses,
-        'train_vq_losses': train_vq_losses,
-        'train_perplexities': train_perplexities,
         'val_losses': val_losses,
-        'val_recon_losses': val_recon_losses,
-        'val_vq_losses': val_vq_losses,
-        'val_perplexities': val_perplexities,
         'learning_rates': learning_rates,
         'best_val_loss': best_val_loss,
         'total_time': total_time,
     }
 
 
-def plot_training_history(history, save_path=None):
-    """绘制训练历史指标"""
-    plt.figure(figsize=(15, 10))
-    
-    # 总损失
-    plt.subplot(2, 3, 1)
-    plt.plot(history['train_losses'], label='Train Loss')
-    plt.plot(history['val_losses'], label='Val Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
-    plt.title('总损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 重建损失
-    plt.subplot(2, 3, 2)
-    plt.plot(history['train_recon_losses'], label='Train Recon Loss')
-    plt.plot(history['val_recon_losses'], label='Val Recon Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('Recon Loss')
-    plt.title('重建损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 量化损失
-    plt.subplot(2, 3, 3)
-    plt.plot(history['train_vq_losses'], label='Train VQ Loss')
-    plt.plot(history['val_vq_losses'], label='Val VQ Loss')
-    plt.xlabel('Epochs')
-    plt.ylabel('VQ Loss')
-    plt.title('量化损失')
-    plt.legend()
-    plt.grid(True)
-    
-    # 困惑度
-    plt.subplot(2, 3, 4)
-    plt.plot(history['train_perplexities'], label='Train Perplexity')
-    plt.plot(history['val_perplexities'], label='Val Perplexity')
-    plt.xlabel('Epochs')
-    plt.ylabel('Perplexity')
-    plt.title('码本使用率 (Perplexity)')
-    plt.legend()
-    plt.grid(True)
-    
-    # 学习率
-    plt.subplot(2, 3, 5)
-    plt.plot(history['learning_rates'])
-    plt.xlabel('Epochs')
-    plt.ylabel('Learning Rate')
-    plt.title('学习率')
-    plt.grid(True)
-    
-    # 训练统计信息
-    plt.subplot(2, 3, 6)
-    plt.text(0.5, 0.5, 
-             f"最佳验证损失: {history['best_val_loss']:.6f}\n"
-             f"训练总时间: {history['total_time']/60:.2f} 分钟",
-             horizontalalignment='center', 
-             verticalalignment='center',
-             fontsize=12)
-    plt.axis('off')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path)
-        print(f"训练历史图表已保存到: {save_path}")
-    
-    plt.show()
-
-
 def main():
     """主函数，处理命令行参数并启动训练"""
-    parser = argparse.ArgumentParser(description="训练VQVAE模型")
+    parser = argparse.ArgumentParser(description="训练VAE模型")
     parser.add_argument('--data_dir', type=str, required=True, help='数据目录路径，包含vec子目录')
-    parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
+    parser.add_argument('--batch_size', type=int, default=128, help='批次大小')
     parser.add_argument('--num_workers', type=int, default=4, help='数据加载器工作进程数')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
-    parser.add_argument('--beta', type=float, default=1.0, help='重建损失权重，相对于量化损失')
+    parser.add_argument('--epochs', type=int, default=1000, help='训练轮数')
+    parser.add_argument('--lr', type=float, default=2e-4, help='学习率')
     parser.add_argument('--device', type=str, default='cuda', help='设备类型')
     parser.add_argument('--embed_dim', type=int, default=256, help='嵌入维度')
-    parser.add_argument('--num_embeddings', type=int, default=1024, help='码本大小')
+    parser.add_argument('--latent_dim', type=int, default=256, help='潜在空间维度')
     parser.add_argument('--enc_layers', type=int, default=4, help='编码器层数')
     parser.add_argument('--dec_layers', type=int, default=4, help='解码器层数')
-    parser.add_argument('--ca_level_start', type=int, default=0, help='解码器中交叉注意力开始的层数')
     parser.add_argument('--num_heads', type=int, default=8, help='注意力头数')
-    parser.add_argument('--commitment_cost', type=float, default=0.25, help='承诺损失权重')
-    parser.add_argument('--decay', type=float, default=0.99, help='EMA衰减率')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout概率')
+    parser.add_argument('--kl_weight', type=float, default=0.1, help='KL散度损失权重')
+    parser.add_argument('--kl_annealing', action='store_true', help='是否使用KL权重退火')
+    parser.add_argument('--kl_annealing_epochs', type=int, default=50, help='KL权重退火的轮数')
     parser.add_argument('--save_dir', type=str, default='./checkpoints', help='模型保存目录')
     parser.add_argument('--log_dir', type=str, default='./logs', help='日志目录')
     parser.add_argument('--exp_name', type=str, default=None, help='实验名称')
     parser.add_argument('--log_interval', type=int, default=10, help='日志记录间隔')
-    parser.add_argument('--save_interval', type=int, default=5, help='模型保存间隔')
+    parser.add_argument('--save_interval', type=int, default=50, help='模型保存间隔')
     parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb')
     parser.add_argument('--use_tensorboard', action='store_true', help='是否使用tensorboard')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点文件')
-    
+    parser.add_argument('--early_stopping_patience', type=int, default=500, help='早停的耐心值')
+    parser.add_argument('--early_stopping_delta', type=float, default=5e-9, help='最小改善阈值')
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4, help='梯度累积步数')
     args = parser.parse_args()
     
     # 设置随机种子
@@ -676,18 +639,16 @@ def main():
     # 获取CAD类别信息
     cad_class_info = CAD_CLASS_INFO
     
-    # 创建VQVAE模型
-    model = VQVAE(
+    # 创建VAE模型
+    model = VAE(
         cad_class_info=cad_class_info,
         embed_dim=args.embed_dim,
-        num_embeddings=args.num_embeddings,
+        latent_dim=args.latent_dim,
         enc_layers=args.enc_layers,
         dec_layers=args.dec_layers,
-        ca_level_start=args.ca_level_start,
         num_heads=args.num_heads,
-        commitment_cost=args.commitment_cost,
-        decay=args.decay,
         dropout=args.dropout,
+        kl_weight=args.kl_weight,  # 设置模型的KL权重
         device=device
     )
     
@@ -736,7 +697,7 @@ def main():
     print(f"开始训练，共{args.epochs}个轮次")
     
     # 训练模型
-    history = train_vqvae(
+    history = train_vae(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -751,18 +712,15 @@ def main():
         save_interval=args.save_interval,
         use_wandb=args.use_wandb,
         use_tensorboard=args.use_tensorboard,
-        beta=args.beta,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_delta=args.early_stopping_delta,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        kl_weight=args.kl_weight,
+        kl_annealing=args.kl_annealing,
+        kl_annealing_epochs=args.kl_annealing_epochs
     )
     
     print("训练完成")
-    
-    # 绘制训练历史
-    if args.exp_name:
-        plot_path = os.path.join(args.save_dir, args.exp_name, "training_history.png")
-    else:
-        plot_path = os.path.join(args.save_dir, "training_history.png")
-    
-    plot_training_history(history, save_path=plot_path)
 
 
 if __name__ == "__main__":

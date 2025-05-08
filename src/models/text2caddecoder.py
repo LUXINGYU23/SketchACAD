@@ -4,8 +4,8 @@ import torch.nn as nn
 import os, sys
 
 sys.path.append("/".join(os.path.abspath(__file__).split("/")[:-3]))
-from utility.macro import *
-from utility.utils import (
+from src.CadSeqProc.utility.macro import *
+from src.CadSeqProc.utility.utils import (
     generate_attention_mask,
     create_flag_vec,
     create_index_vec,

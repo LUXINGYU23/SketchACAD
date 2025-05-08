@@ -89,18 +89,34 @@ class CADSequenceEmbedder(nn.Module):
     def forward(self, vec_dict, key_padding_mask):
         """
         vec_dict: contains key "cad_vec","flag_vec" and "index_vec"
-        key_padding_mask: Tensor. Shape (N,2). Must be same with cad_vec
+        key_padding_mask: Tensor. Shape (batch_size, seq_len). True for padded elements.
         """
-        num_seq = vec_dict["cad_vec"].shape[1]  # Number of tokens
-        x_seq = vec_dict["cad_vec"][:, :, 0] * (~key_padding_mask[:, :, 0] * 1)
-        y_seq = vec_dict["cad_vec"][:, :, 1] * (~key_padding_mask[:, :, 1] * 1)
+        # vec_dict["cad_vec"] shape: (batch_size, seq_len, 2)
+        # key_padding_mask shape: (batch_size, seq_len), True for padded elements
 
-        return (
-            self.sf(vec_dict["flag_vec"])
-            + self.si(vec_dict["index_vec"])
-            + self.cx(x_seq)
-            + self.cy(y_seq)
-        )
+        if key_padding_mask is not None:
+            # Invert mask: True for non-padded elements, False for padded elements.
+            # active_elements_mask will have shape (batch_size, seq_len)
+            active_elements_mask = ~key_padding_mask
+
+            # Apply the mask to x and y sequences.
+            # Multiply by active_elements_mask.float() to zero out padded elements.
+            # vec_dict["cad_vec"][:, :, 0] has shape (batch_size, seq_len)
+            # active_elements_mask.float() has shape (batch_size, seq_len)
+            x_seq = vec_dict["cad_vec"][:, :, 0] * active_elements_mask.float()
+            y_seq = vec_dict["cad_vec"][:, :, 1] * active_elements_mask.float()
+        else:
+            x_seq = vec_dict["cad_vec"][:, :, 0]
+            y_seq = vec_dict["cad_vec"][:, :, 1]
+
+        # Embed x and y sequences
+        # Ensure x_seq and y_seq are long type for embedding lookup
+        x_embed = self.cx(x_seq.long())
+        y_embed = self.cy(y_seq.long())
+        flag_embed = self.sf(vec_dict["flag_vec"])
+        index_embed = self.si(vec_dict["index_vec"])
+
+        return flag_embed + index_embed + x_embed + y_embed
 
 
 class VectorQuantizerEMA(nn.Module):
@@ -186,7 +202,71 @@ class VectorQuantizerEMA(nn.Module):
         quantized = inputs + (quantized - inputs).detach()
         # convert quantized from BHWC -> BCHW
         return loss, quantized.contiguous(), encodings_flat, encoding_indices
+    
+    def reset_codebook_with_kmeans(self, encoded_inputs, usage_threshold=0.01):
+        """
+        使用K-means重新初始化未使用或使用率低的码书向量
+        
+        Args:
+            encoded_inputs: 编码器输出的嵌入向量 [seq_len, batch_size, embedding_dim]
+            usage_threshold: 码书向量使用率阈值，低于此值的向量将被重新初始化
+        """
+        # 获取当前设备
+        device = self._embedding.weight.device
+        
+        # 将输入展平为 [seq_len*batch_size, embedding_dim]
+        flat_inputs = encoded_inputs.reshape(-1, self._embedding_dim).detach()
+        
+        # 计算当前码书使用率
+        n = torch.sum(self._ema_cluster_size.data)
+        usage = self._ema_cluster_size / n if n > 0 else torch.zeros_like(self._ema_cluster_size)
+        
+        # 找出未使用或低使用率的码书向量
+        unused_indices = torch.where(usage < usage_threshold)[0].cpu().numpy()
+        
+        if len(unused_indices) > 0:
+            # 有需要重置的码书向量
+            print(f"重置 {len(unused_indices)}/{self._num_embeddings} 个低使用率码书向量")
+            
+            # 从当前批次中随机选择样本作为新码书向量
+            num_samples = min(len(flat_inputs), len(unused_indices) * 10)
+            if num_samples < len(unused_indices):
+                return  # 样本不足，跳过本次重置
+                
+            # 随机选择样本
+            perm = torch.randperm(len(flat_inputs))
+            selected_inputs = flat_inputs[perm[:num_samples]]
+            
+            # 使用K-means聚类
+            try:
+                import numpy as np
+                from sklearn.cluster import KMeans
+                
+                # 将张量转换为numpy进行聚类
+                inputs_np = selected_inputs.cpu().numpy()
+                kmeans = KMeans(n_clusters=len(unused_indices), n_init=10)
+                kmeans.fit(inputs_np)
+                
+                # 获取聚类中心作为新的码书向量
+                new_embeddings = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32).to(device)
+                
+                # 更新未使用的码书向量
+                for i, idx in enumerate(unused_indices):
+                    self._embedding.weight.data[idx] = new_embeddings[i]
+                    # 重置EMA统计
+                    self._ema_cluster_size[idx] = n / self._num_embeddings  # 初始化为平均使用率
+                    self._ema_w.data[idx] = new_embeddings[i] * self._ema_cluster_size[idx]
+                return True
+            except ImportError:
+                print("请安装numpy和sklearn以使用K-means聚类")
+                return True
+        return False
 
+    def get_perplexity(self):
+        n = torch.sum(self._ema_cluster_size.data)
+        usage = self._ema_cluster_size / n if n > 0 else torch.zeros_like(self._ema_cluster_size)
+        perplexity = torch.exp(-torch.sum(usage * torch.log(usage + 1e-10)))
+        return perplexity.item() / self._num_embeddings
 
 if __name__ == "__main__":
     pass
